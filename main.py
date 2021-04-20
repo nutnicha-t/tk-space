@@ -3,11 +3,83 @@ from random import randint, random
 
 import tkinter as tk
 
-from gamelib import Sprite, GameApp, Text
+from gamelib import Sprite, GameApp, Text, KeyboardHandler
 
 from consts import *
 from elements import Ship, Bullet, Enemy
 from utils import random_edge_position, normalize_vector, direction_to_dxdy, vector_len, distance
+
+class GameKeyboardHandler(KeyboardHandler):
+    def __init__(self, game_app, ship, successor=None):
+        super().__init__(successor)
+        self.game_app = game_app
+        self.ship = ship
+
+class BombKeyPressedHandler(GameKeyboardHandler):
+    def handle(self, event):
+        print('here')
+        if event.char.upper() == 'Z':
+            self.game_app.bomb()
+        else:
+            super().handle(event)
+
+class ShipMovementKeyPressedHandler(GameKeyboardHandler):
+    def handle(self, event):
+        if event.keysym == 'Left':
+            self.ship.start_turn('LEFT')
+        elif event.keysym == 'Right':
+            self.ship.start_turn('RIGHT')
+        elif event.char == ' ':
+            self.ship.fire()
+        elif event.char.upper() == 'Z':
+            self.ship.bomb()
+
+class ShipMovementKeyReleasedHandler(GameKeyboardHandler):
+    def handle(self, event):
+        if event.keysym == 'Left':
+            self.ship.stop_turn('LEFT')
+        elif event.keysym == 'Right':
+            self.ship.stop_turn('RIGHT')
+
+class StatusWithText:
+    def __init__(self, app, x, y, text_template, default_value=0, default_level=1, default_bomb_power=10):
+        self.x = x
+        self.y = y
+        self.text_template = text_template
+        self.default_value = default_value
+        self.label_text = Text(app, '', x, y)
+        self.default_level = default_level
+        self.default_bomb_power = default_bomb_power
+        self.update_label()
+
+    @property
+    def value(self):
+        return self._value
+
+    @value.setter
+    def value(self, v):
+        self._value = v
+        self.update_label()
+
+    def update_label(self):
+        self.label_text.set_text(self.text_template % self.value)
+
+    @property
+    def level(self):
+        return self._level
+
+    @level.setter
+    def level(self, l):
+        self._level = l
+    
+    @property
+    def bomb_power(self):
+        return self._bomb_power
+
+    @bomb_power.setter
+    def bomb_power(self, b):
+        self._bomb_power = b
+
 
 
 class SpaceGame(GameApp):
@@ -18,10 +90,8 @@ class SpaceGame(GameApp):
         self.level_text = Text(self, '', 100, 580)
         self.update_level_text()
 
-        self.score = 0
         self.score_wait = 0
-        self.score_text = Text(self, '', 100, 20)
-        self.update_score_text()
+        self.score = StatusWithText(self, 100, 20, 'Score: %d', 0)
 
         self.bomb_power = BOMB_FULL_POWER
         self.bomb_wait = 0
@@ -32,6 +102,21 @@ class SpaceGame(GameApp):
 
         self.enemies = []
         self.bullets = []
+
+        self.enemy_creation_strategies = [
+            (0.2, StarEnemyGenerationStrategy()),
+            (1.0, EdgeEnemyGenerationStrategy())
+        ]
+
+        self.init_key_handlers()
+
+    def init_key_handlers(self):
+        key_pressed_handler = ShipMovementKeyPressedHandler(self, self.ship)
+        key_pressed_handler = BombKeyPressedHandler(self, self.ship, key_pressed_handler)
+        self.key_pressed_handler = key_pressed_handler
+
+        key_released_handler = ShipMovementKeyReleasedHandler(self, self.ship)
+        self.key_released_handler = key_released_handler
 
     def add_enemy(self, enemy):
         self.enemies.append(enemy)
@@ -61,8 +146,6 @@ class SpaceGame(GameApp):
 
             self.update_bomb_power_text()
 
-    def update_score_text(self):
-        self.score_text.set_text('Score: %d' % self.score)
 
     def update_bomb_power_text(self):
         self.bomb_power_text.set_text('Power: %d%%' % self.bomb_power)
@@ -73,9 +156,8 @@ class SpaceGame(GameApp):
     def update_score(self):
         self.score_wait += 1
         if self.score_wait >= SCORE_WAIT:
-            self.score += 1
+            self.score.value += 1
             self.score_wait = 0
-            self.update_score_text()
 
     def update_bomb_power(self):
         self.bomb_wait += 1
@@ -112,10 +194,11 @@ class SpaceGame(GameApp):
         return [enemy]
 
     def create_enemies(self):
-        if random() < 0.2:
-            enemies = self.create_enemy_star()
-        else:
-            enemies = self.create_enemy_from_edges()
+        p = random()
+        for prob, strategy in self.enemy_creation_strategies:
+            if p < prob:
+                enemies = strategy.generate(self, self.ship)
+                break
 
         for e in enemies:
             self.add_enemy(e)
@@ -158,24 +241,67 @@ class SpaceGame(GameApp):
         self.enemies = self.update_and_filter_deleted(self.enemies)
 
         self.update_score()
-        self.update_bomb_power()
+        # self.update_power()
 
-    def on_key_pressed(self, event):
-        if event.keysym == 'Left':
-            self.ship.start_turn('LEFT')
-        elif event.keysym == 'Right':
-            self.ship.start_turn('RIGHT')
-        elif event.char == ' ':
-            self.ship.fire()
-        elif event.char.upper() == 'Z':
-            self.bomb()
 
-    def on_key_released(self, event):
-        if event.keysym == 'Left':
-            self.ship.stop_turn('LEFT')
-        elif event.keysym == 'Right':
-            self.ship.stop_turn('RIGHT')
+class EnemyGenerationStrategy(ABC):
+    @abstractmethod
+    def generate(self, space_game, ship):
+        # def create_enemy_star(self):
+        self.enemies = []
 
+        self.x = randint(100, CANVAS_WIDTH - 100)
+        self.y = randint(100, CANVAS_HEIGHT - 100)
+
+        while vector_len(self.x - self.ship.x, self.y - self.ship.y) < 200:
+            self.x = randint(100, CANVAS_WIDTH - 100)
+            self.y = randint(100, CANVAS_HEIGHT - 100)
+
+        for d in range(18):
+            self.dx, self.dy = direction_to_dxdy(d * 20)
+            self.enemy = Enemy(self, self.x, self.y, self.dx * ENEMY_BASE_SPEED, self.dy * ENEMY_BASE_SPEED)
+            self.enemies.append(self.enemy)
+
+        return self.enemies
+
+    # def create_enemy_from_edges(self):
+        self.x, self.y = random_edge_position()
+        self.vx, self.vy = normalize_vector(self.ship.x - self.x, self.ship.y - self.y)
+
+        self.vx *= ENEMY_BASE_SPEED
+        self.vy *= ENEMY_BASE_SPEED
+
+        self.enemy = Enemy(self, self.x, self.y, self.vx, self.vy)
+        return [self.enemy]
+
+class StarEnemyGenerationStrategy(EnemyGenerationStrategy):
+    def generate(self, space_game, ship):
+        self.enemies = []
+
+        self.x = randint(100, CANVAS_WIDTH - 100)
+        self.y = randint(100, CANVAS_HEIGHT - 100)
+
+        while vector_len(self.x - self.ship.x, self.y - self.ship.y) < 200:
+            self.x = randint(100, CANVAS_WIDTH - 100)
+            self.y = randint(100, CANVAS_HEIGHT - 100)
+
+        for d in range(18):
+            self.dx, self.dy = direction_to_dxdy(d * 20)
+            self.enemy = Enemy(self, self.x, self.y, self.dx * ENEMY_BASE_SPEED, self.dy * ENEMY_BASE_SPEED)
+            self.enemies.append(self.enemy)
+
+        return self.enemies
+
+class EdgeEnemyGenerationStrategy(EnemyGenerationStrategy):
+    def generate(self, space_game, ship):
+        self.x, self.y = random_edge_position()
+        self.vx, self.vy = normalize_vector(self.ship.x - self.x, self.ship.y - self.y)
+
+        self.vx *= ENEMY_BASE_SPEED
+        self.vy *= ENEMY_BASE_SPEED
+
+        self.enemy = Enemy(self, self.x, self.y, self.vx, self.vy)
+        return [self.enemy]
 
 if __name__ == "__main__":
     root = tk.Tk()
